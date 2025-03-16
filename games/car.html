@@ -1,0 +1,257 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chill Driving Game</title>
+    <style>
+        body { margin: 0; overflow: hidden; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+    <!-- Include Three.js and SimplexNoise via CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/simplex-noise@2.4.0/simplex-noise.js"></script>
+
+    <!-- Game Logic -->
+    <script>
+        // Scene setup
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true; // Enable shadows
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Soft shadows for better quality
+        document.body.appendChild(renderer.domElement);
+
+        // Add fog for atmosphere
+        scene.fog = new THREE.Fog(0x87CEEB, 50, 200); // Light blue fog matching the sky
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0x404040, 1);
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        directionalLight.position.set(50, 50, 50); // Position the "sun" higher
+        directionalLight.castShadow = true;
+        directionalLight.shadow.mapSize.width = 1024;
+        directionalLight.shadow.mapSize.height = 1024;
+        directionalLight.shadow.camera.near = 0.5;
+        directionalLight.shadow.camera.far = 500;
+        scene.add(ambientLight, directionalLight);
+
+        // Add a skybox (a large sphere with a gradient material)
+        const skyGeometry = new THREE.SphereGeometry(500, 32, 32);
+        const skyMaterial = new THREE.MeshBasicMaterial({ 
+            color: 0x87CEEB, // Light blue sky
+            side: THREE.BackSide
+        });
+        const sky = new THREE.Mesh(skyGeometry, skyMaterial);
+        scene.add(sky);
+
+        // Terrain
+        const chunkSize = 100;
+        const chunks = {};
+        const renderDistance = 2;
+        const noise = new SimplexNoise();
+
+        function generateChunk(chunkX, chunkZ) {
+            const geometry = new THREE.PlaneGeometry(chunkSize, chunkSize, 32, 32);
+            
+            // Load a grass texture
+            const textureLoader = new THREE.TextureLoader();
+            const grassTexture = textureLoader.load('https://threejs.org/examples/textures/terrain/grasslight-big.jpg');
+            grassTexture.wrapS = grassTexture.wrapT = THREE.RepeatWrapping;
+            grassTexture.repeat.set(10, 10);
+
+            const material = new THREE.MeshStandardMaterial({ 
+                map: grassTexture
+            });
+            const mesh = new THREE.Mesh(geometry, material);
+            const vertices = geometry.attributes.position.array;
+            for (let i = 0; i < vertices.length; i += 3) {
+                const x = vertices[i] + (chunkX * chunkSize);
+                const z = vertices[i + 1] + (chunkZ * chunkSize);
+                vertices[i + 2] = noise.noise2D(x * 0.01, z * 0.01) * 5;
+            }
+            geometry.attributes.position.needsUpdate = true;
+            geometry.computeVertexNormals();
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.position.set(chunkX * chunkSize, 0, chunkZ * chunkSize);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+            chunks[`${chunkX},${chunkZ}`] = mesh;
+        }
+
+        function updateChunks(playerX, playerZ) {
+            const chunkX = Math.floor(playerX / chunkSize);
+            const chunkZ = Math.floor(playerZ / chunkSize);
+            for (let x = chunkX - renderDistance; x <= chunkX + renderDistance; x++) {
+                for (let z = chunkZ - renderDistance; z <= chunkZ + renderDistance; z++) {
+                    const key = `${x},${z}`;
+                    if (!chunks[key]) generateChunk(x, z);
+                }
+            }
+        }
+
+        // Procedural trees (fixed to avoid flashing)
+        const treeGeometry = new THREE.ConeGeometry(1, 3, 8);
+        const treeMaterial = new THREE.MeshStandardMaterial({ color: 0x2E8B57 });
+        const treeCountPerChunk = 50;
+        const totalInstanceCount = treeCountPerChunk * (2 * renderDistance + 1) * (2 * renderDistance + 1);
+        const treeInstances = new THREE.InstancedMesh(treeGeometry, treeMaterial, totalInstanceCount);
+        treeInstances.castShadow = true;
+        treeInstances.receiveShadow = true;
+        scene.add(treeInstances);
+
+        let treePositions = new Array(totalInstanceCount).fill().map(() => ({ x: 0, y: 0, z: 0 }));
+
+        function updateTrees(playerX, playerZ) {
+            const chunkX = Math.floor(playerX / chunkSize);
+            const chunkZ = Math.floor(playerZ / chunkSize);
+            let instanceIndex = 0;
+
+            // Update only trees within render distance
+            for (let x = chunkX - renderDistance; x <= chunkX + renderDistance; x++) {
+                for (let z = chunkZ - renderDistance; z <= chunkZ + renderDistance; z++) {
+                    const key = `${x},${z}`;
+                    if (chunks[key]) {
+                        for (let i = 0; i < treeCountPerChunk; i++) {
+                            const posX = (x * chunkSize) + (Math.random() * chunkSize - chunkSize / 2);
+                            const posZ = (z * chunkSize) + (Math.random() * chunkSize - chunkSize / 2);
+                            const posY = noise.noise2D(posX * 0.01, posZ * 0.01) * 5 + 1.5;
+
+                            // Update or initialize position
+                            if (instanceIndex < totalInstanceCount) {
+                                treePositions[instanceIndex] = { x: posX, y: posY, z: posZ };
+                                const matrix = new THREE.Matrix4().setPosition(posX, posY, posZ);
+                                treeInstances.setMatrixAt(instanceIndex, matrix);
+                                instanceIndex++;
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Clear unused instances (set them far away to avoid rendering)
+            for (let i = instanceIndex; i < totalInstanceCount; i++) {
+                const matrix = new THREE.Matrix4().setPosition(10000, 0, 10000); // Move out of view
+                treeInstances.setMatrixAt(i, matrix);
+            }
+
+            treeInstances.instanceMatrix.needsUpdate = true;
+        }
+
+        // Car (simple model made of boxes)
+        const carGroup = new THREE.Group();
+
+        // Car body
+        const carBodyGeometry = new THREE.BoxGeometry(2, 0.8, 4);
+        const carBodyMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000 });
+        const carBody = new THREE.Mesh(carBodyGeometry, carBodyMaterial);
+        carBody.position.set(0, 0.5, 0);
+        carBody.castShadow = true;
+        carBody.receiveShadow = true;
+        carGroup.add(carBody);
+
+        // Car cabin
+        const carCabinGeometry = new THREE.BoxGeometry(1.5, 0.5, 2);
+        const carCabinMaterial = new THREE.MeshStandardMaterial({ color: 0x888888 });
+        const carCabin = new THREE.Mesh(carCabinGeometry, carCabinMaterial);
+        carCabin.position.set(0, 1.2, 0);
+        carCabin.castShadow = true;
+        carCabin.receiveShadow = true;
+        carGroup.add(carCabin);
+
+        // Wheels
+        const wheelGeometry = new THREE.CylinderGeometry(0.4, 0.4, 0.3, 16);
+        const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x333333 });
+        const wheel1 = new THREE.Mesh(wheelGeometry, wheelMaterial);
+        wheel1.position.set(1, 0.3, 1.5);
+        wheel1.rotation.z = Math.PI / 2;
+        wheel1.castShadow = true;
+        wheel1.receiveShadow = true;
+        carGroup.add(wheel1);
+
+        const wheel2 = new THREE.Mesh(wheelGeometry, wheelMaterial);
+        wheel2.position.set(-1, 0.3, 1.5);
+        wheel2.rotation.z = Math.PI / 2;
+        wheel2.castShadow = true;
+        wheel2.receiveShadow = true;
+        carGroup.add(wheel2);
+
+        const wheel3 = new THREE.Mesh(wheelGeometry, wheelMaterial);
+        wheel3.position.set(1, 0.3, -1.5);
+        wheel3.rotation.z = Math.PI / 2;
+        wheel3.castShadow = true;
+        wheel3.receiveShadow = true;
+        carGroup.add(wheel3);
+
+        const wheel4 = new THREE.Mesh(wheelGeometry, wheelMaterial);
+        wheel4.position.set(-1, 0.3, -1.5);
+        wheel4.rotation.z = Math.PI / 2;
+        wheel4.castShadow = true;
+        wheel4.receiveShadow = true;
+        carGroup.add(wheel4);
+
+        carGroup.position.set(0, 1, 0);
+        scene.add(carGroup);
+
+        // Car physics variables
+        let speed = 0;
+        const maxSpeed = 0.5;
+        const acceleration = 0.01;
+        const friction = 0.98;
+        let rotationSpeed = 0;
+        const maxRotationSpeed = 0.05;
+
+        // Keyboard controls
+        const keys = { w: false, a: false, s: false, d: false };
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'w') keys.w = true;
+            if (e.key === 'a') keys.a = true;
+            if (e.key === 's') keys.s = true;
+            if (e.key === 'd') keys.d = true;
+        });
+        document.addEventListener('keyup', (e) => {
+            if (e.key === 'w') keys.w = false;
+            if (e.key === 'a') keys.a = false;
+            if (e.key === 's') keys.s = false;
+            if (e.key === 'd') keys.d = false;
+        });
+
+        function updateCar() {
+            if (keys.w) speed = Math.min(speed + acceleration, maxSpeed);
+            if (keys.s) speed = Math.max(speed - acceleration, -maxSpeed / 2);
+            if (keys.a) rotationSpeed = Math.min(rotationSpeed + 0.005, maxRotationSpeed);
+            if (keys.d) rotationSpeed = Math.max(rotationSpeed - 0.005, -maxRotationSpeed);
+            speed *= friction;
+            rotationSpeed *= friction;
+            carGroup.rotation.y += rotationSpeed;
+            const direction = new THREE.Vector3(0, 0, -1).applyQuaternion(carGroup.quaternion);
+            carGroup.position.add(direction.multiplyScalar(speed));
+            const raycaster = new THREE.Raycaster(carGroup.position, new THREE.Vector3(0, -1, 0), 0, 10);
+            const intersects = raycaster.intersectObjects(Object.values(chunks));
+            if (intersects.length > 0) carGroup.position.y = intersects[0].point.y + 1;
+        }
+
+        function updateCamera() {
+            const cameraPosition = carGroup.position.clone().add(new THREE.Vector3(0, 5, 15));
+            camera.position.lerp(cameraPosition, 0.1);
+            camera.lookAt(carGroup.position);
+        }
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            updateCar();
+            updateChunks(carGroup.position.x, carGroup.position.z);
+            updateTrees(carGroup.position.x, carGroup.position.z);
+            updateCamera();
+            renderer.render(scene, camera);
+        }
+        animate();
+    </script>
+</body>
+</html>
